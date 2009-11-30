@@ -267,6 +267,8 @@ en:
   field_identity_url: OpenID URL
   field_content: Content
   field_group_by: Group results by
+  field_hide: Hide
+
   
   setting_app_title: Application title
   setting_app_subtitle: Application subtitle
