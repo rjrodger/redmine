@@ -46,6 +46,8 @@ module QueriesHelper
         format_date(value)
       elsif value.is_a?(Time)
         format_time(value)
+      elsif value.is_a?(Float)
+        "%0.02f" % value
       else
         case column.name
         when :subject
