@@ -41,6 +41,7 @@
 <p><em><%= l(:text_user_mail_option) %></em></p>
 <% end %>
 <p><label><%= check_box_tag 'no_self_notified', 1, @user.pref[:no_self_notified] %> <%= l(:label_user_mail_no_self_notified) %></label></p>
+<%= call_hook(:mail_configurator_options, { :user_pref => @user.pref }) %>	
 </div>
 
 <h3><%=l(:label_preferences)%></h3>
