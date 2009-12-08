@@ -142,6 +142,12 @@ class ApplicationController < ActionController::Base
   def authorize_global(ctrl = params[:controller], action = params[:action], global = true)
     authorize(ctrl, action, global)
   end
+
+
+  def admin_logged_in?
+    return User.current.logged? && User.current.admin?
+  end
+
   
   # make sure that the user is a member of the project (or admin) if project is private
   # used as a before_filter for actions that do not require any particular permission on the project
