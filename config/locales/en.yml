@@ -760,6 +760,7 @@ en:
   version_status_open: open
   version_status_locked: locked
   version_status_closed: closed
+  version_status_planned: planned
 
   field_active: Active
   

@@ -23,7 +23,7 @@ class Version < ActiveRecord::Base
   acts_as_attachable :view_permission => :view_files,
                      :delete_permission => :manage_files
 
-  VERSION_STATUSES = %w(open locked closed)
+  VERSION_STATUSES = %w(open locked closed planned)
   
   validates_presence_of :name
   validates_uniqueness_of :name, :scope => [:project_id]
