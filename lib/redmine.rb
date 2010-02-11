@@ -32,16 +32,17 @@ Redmine::AccessControl.map do |map|
   map.permission :select_project_modules, {:projects => :modules}, :require => :member
   map.permission :manage_members, {:projects => :settings, :members => [:new, :edit, :destroy, :autocomplete_for_member]}, :require => :member
   map.permission :manage_versions, {:projects => [:settings, :add_version], :versions => [:edit, :close_completed, :destroy]}, :require => :member
+  map.permission :add_subprojects, {:projects => :add}, :require => :member
   
   map.project_module :issue_tracking do |map|
     # Issue categories
     map.permission :manage_categories, {:projects => [:settings, :add_issue_category], :issue_categories => [:edit, :destroy]}, :require => :member
     # Issues
-    map.permission :view_issues, {:projects => [:changelog, :roadmap], 
+    map.permission :view_issues, {:projects => :roadmap, 
                                   :issues => [:index, :changes, :show, :context_menu],
                                   :versions => [:show, :status_by],
                                   :queries => :index,
-                                  :reports => :issue_report}
+                                  :reports => [:issue_report, :issue_report_details]}
     map.permission :add_issues, {:issues => [:new, :update_form]}
     map.permission :edit_issues, {:issues => [:edit, :reply, :bulk_edit, :update_form]}
     map.permission :manage_issue_relations, {:issue_relations => [:new, :destroy]}
@@ -91,6 +92,7 @@ Redmine::AccessControl.map do |map|
     map.permission :rename_wiki_pages, {:wiki => :rename}, :require => :member
     map.permission :delete_wiki_pages, {:wiki => :destroy}, :require => :member
     map.permission :view_wiki_pages, :wiki => [:index, :special]
+    map.permission :export_wiki_pages, {}
     map.permission :view_wiki_edits, :wiki => [:history, :diff, :annotate]
     map.permission :edit_wiki_pages, :wiki => [:edit, :preview, :add_attachment]
     map.permission :delete_wiki_pages_attachments, {}
@@ -142,7 +144,7 @@ Redmine::MenuManager.map :project_menu do |menu|
   menu.push :overview, { :controller => 'projects', :action => 'show' }
   menu.push :activity, { :controller => 'projects', :action => 'activity' }
   menu.push :roadmap, { :controller => 'projects', :action => 'roadmap' }, 
-              :if => Proc.new { |p| p.versions.any? }
+              :if => Proc.new { |p| p.shared_versions.any? }
   menu.push :issues, { :controller => 'issues', :action => 'index' }, :param => :project_id, :caption => :label_issue_plural
   menu.push :new_issue, { :controller => 'issues', :action => 'new' }, :param => :project_id, :caption => :label_issue_new,
               :html => { :accesskey => Redmine::AccessKeys.key_for(:new_issue) }
@@ -152,7 +154,7 @@ Redmine::MenuManager.map :project_menu do |menu|
               :if => Proc.new { |p| p.wiki && !p.wiki.new_record? }
   menu.push :boards, { :controller => 'boards', :action => 'index', :id => nil }, :param => :project_id,
               :if => Proc.new { |p| p.boards.any? }, :caption => :label_board_plural
-  menu.push :files, { :controller => 'projects', :action => 'list_files' }, :caption => :label_attachment_plural
+  menu.push :files, { :controller => 'projects', :action => 'list_files' }, :caption => :label_file_plural
   menu.push :repository, { :controller => 'repositories', :action => 'show' },
               :if => Proc.new { |p| p.repository && !p.repository.new_record? }
   menu.push :settings, { :controller => 'projects', :action => 'settings' }, :last => true

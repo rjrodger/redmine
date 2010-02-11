@@ -45,6 +45,8 @@ class Issue < ActiveRecord::Base
   
   acts_as_activity_provider :find_options => {:include => [:project, :author, :tracker]},
                             :author_key => :author_id
+
+  DONE_RATIO_OPTIONS = %w(issue_field issue_status)
   
   validates_presence_of :subject, :priority, :project, :tracker, :author, :status
   validates_length_of :subject, :maximum => 255
@@ -55,7 +57,8 @@ class Issue < ActiveRecord::Base
                                           :conditions => Project.allowed_to_condition(args.first || User.current, :view_issues) } }
   
   named_scope :open, :conditions => ["#{IssueStatus.table_name}.is_closed = ?", false], :include => :status
-  
+
+  before_save :update_done_ratio_from_issue_status
   after_save :create_journal
   
   # Returns true if usr or current user is allowed to view the issue
@@ -100,7 +103,10 @@ class Issue < ActiveRecord::Base
         # reassign to the category with same name if any
         new_category = issue.category.nil? ? nil : new_project.issue_categories.find_by_name(issue.category.name)
         issue.category = new_category
-        issue.fixed_version = nil
+        # Keep the fixed_version if it's still valid in the new_project
+        unless new_project.shared_versions.include?(issue.fixed_version)
+          issue.fixed_version = nil
+        end
         issue.project = new_project
       end
       if new_tracker
@@ -108,7 +114,15 @@ class Issue < ActiveRecord::Base
       end
       if options[:copy]
         issue.custom_field_values = self.custom_field_values.inject({}) {|h,v| h[v.custom_field_id] = v.value; h}
-        issue.status = self.status
+        issue.status = if options[:attributes] && options[:attributes][:status_id]
+                         IssueStatus.find_by_id(options[:attributes][:status_id])
+                       else
+                         self.status
+                       end
+      end
+      # Allow bulk setting of attributes on the issue
+      if options[:attributes]
+        issue.attributes = options[:attributes]
       end
       if issue.save
         unless options[:copy]
@@ -131,10 +145,66 @@ class Issue < ActiveRecord::Base
   def tracker_id=(tid)
     self.tracker = nil
     write_attribute(:tracker_id, tid)
+    result = write_attribute(:tracker_id, tid)
+    @custom_field_values = nil
+    result
   end
+  
+  # Overrides attributes= so that tracker_id gets assigned first
+  def attributes_with_tracker_first=(new_attributes, *args)
+    return if new_attributes.nil?
+    new_tracker_id = new_attributes['tracker_id'] || new_attributes[:tracker_id]
+    if new_tracker_id
+      self.tracker_id = new_tracker_id
+    end
+    send :attributes_without_tracker_first=, new_attributes, *args
+  end
+  alias_method_chain :attributes=, :tracker_first
   
   def estimated_hours=(h)
     write_attribute :estimated_hours, (h.is_a?(String) ? h.to_hours : h)
+  end
+  
+  SAFE_ATTRIBUTES = %w(
+    tracker_id
+    status_id
+    category_id
+    assigned_to_id
+    priority_id
+    fixed_version_id
+    subject
+    description
+    start_date
+    due_date
+    done_ratio
+    estimated_hours
+    custom_field_values
+  ) unless const_defined?(:SAFE_ATTRIBUTES)
+  
+  # Safely sets attributes
+  # Should be called from controllers instead of #attributes=
+  # attr_accessible is too rough because we still want things like
+  # Issue.new(:project => foo) to work
+  # TODO: move workflow/permission checks from controllers to here
+  def safe_attributes=(attrs, user=User.current)
+    return if attrs.nil?
+    self.attributes = attrs.reject {|k,v| !SAFE_ATTRIBUTES.include?(k)}
+  end
+  
+  def done_ratio
+    if Issue.use_status_for_done_ratio? && status && status.default_done_ratio?
+      status.default_done_ratio
+    else
+      read_attribute(:done_ratio)
+    end
+  end
+
+  def self.use_status_for_done_ratio?
+    Setting.issue_done_ratio == 'issue_status'
+  end
+
+  def self.use_field_for_done_ratio?
+    Setting.issue_done_ratio == 'issue_field'
   end
   
   def validate
@@ -170,6 +240,14 @@ class Issue < ActiveRecord::Base
     # default assignment based on category
     if assigned_to.nil? && category && category.assigned_to
       self.assigned_to = category.assigned_to
+    end
+  end
+  
+  # Set the done_ratio using the status if that setting is set.  This will keep the done_ratios
+  # even if the user turns off the setting later
+  def update_done_ratio_from_issue_status
+    if Issue.use_status_for_done_ratio? && status && status.default_done_ratio?
+      self.done_ratio = status.default_done_ratio
     end
   end
   
@@ -234,7 +312,7 @@ class Issue < ActiveRecord::Base
   
   # Versions that the issue can be assigned to
   def assignable_versions
-    @assignable_versions ||= (project.versions.open + [Version.find_by_id(fixed_version_id_was)]).compact.uniq.sort
+    @assignable_versions ||= (project.shared_versions.open + [Version.find_by_id(fixed_version_id_was)]).compact.uniq.sort
   end
   
   # Returns true if this issue is blocked by another issue that is still open
@@ -250,13 +328,16 @@ class Issue < ActiveRecord::Base
     blocked? ? statuses.reject {|s| s.is_closed?} : statuses
   end
   
-  # Returns the mail adresses of users that should be notified for the issue
+  # Returns the mail adresses of users that should be notified
   def recipients
-    recipients = project.recipients
+    notified = project.notified_users
     # Author and assignee are always notified unless they have been locked
-    recipients << author.mail if author && author.active?
-    recipients << assigned_to.mail if assigned_to && assigned_to.active?
-    recipients.compact.uniq
+    notified << author if author && author.active?
+    notified << assigned_to if assigned_to && assigned_to.active?
+    notified.uniq!
+    # Remove users that can not view the issue
+    notified.reject! {|user| !visible?(user)}
+    notified.collect(&:mail)
   end
   
   # Returns the total number of hours spent on this issue.
@@ -318,8 +399,93 @@ class Issue < ActiveRecord::Base
     s << ' assigned-to-me' if User.current.logged? && assigned_to_id == User.current.id
     s
   end
+
+  # Unassigns issues from +version+ if it's no longer shared with issue's project
+  def self.update_versions_from_sharing_change(version)
+    # Update issues assigned to the version
+    update_versions(["#{Issue.table_name}.fixed_version_id = ?", version.id])
+  end
+  
+  # Unassigns issues from versions that are no longer shared
+  # after +project+ was moved
+  def self.update_versions_from_hierarchy_change(project)
+    moved_project_ids = project.self_and_descendants.reload.collect(&:id)
+    # Update issues of the moved projects and issues assigned to a version of a moved project
+    Issue.update_versions(["#{Version.table_name}.project_id IN (?) OR #{Issue.table_name}.project_id IN (?)", moved_project_ids, moved_project_ids])
+  end
+
+  # Extracted from the ReportsController.
+  def self.by_tracker(project)
+    count_and_group_by(:project => project,
+                       :field => 'tracker_id',
+                       :joins => Tracker.table_name)
+  end
+
+  def self.by_version(project)
+    count_and_group_by(:project => project,
+                       :field => 'fixed_version_id',
+                       :joins => Version.table_name)
+  end
+
+  def self.by_priority(project)
+    count_and_group_by(:project => project,
+                       :field => 'priority_id',
+                       :joins => IssuePriority.table_name)
+  end
+
+  def self.by_category(project)
+    count_and_group_by(:project => project,
+                       :field => 'category_id',
+                       :joins => IssueCategory.table_name)
+  end
+
+  def self.by_assigned_to(project)
+    count_and_group_by(:project => project,
+                       :field => 'assigned_to_id',
+                       :joins => User.table_name)
+  end
+
+  def self.by_author(project)
+    count_and_group_by(:project => project,
+                       :field => 'author_id',
+                       :joins => User.table_name)
+  end
+
+  def self.by_subproject(project)
+    ActiveRecord::Base.connection.select_all("select    s.id as status_id, 
+                                                s.is_closed as closed, 
+                                                i.project_id as project_id,
+                                                count(i.id) as total 
+                                              from 
+                                                #{Issue.table_name} i, #{IssueStatus.table_name} s
+                                              where 
+                                                i.status_id=s.id 
+                                                and i.project_id IN (#{project.descendants.active.collect{|p| p.id}.join(',')})
+                                              group by s.id, s.is_closed, i.project_id") if project.descendants.active.any?
+  end
+  # End ReportsController extraction
   
   private
+  
+  # Update issues so their versions are not pointing to a
+  # fixed_version that is not shared with the issue's project
+  def self.update_versions(conditions=nil)
+    # Only need to update issues with a fixed_version from
+    # a different project and that is not systemwide shared
+    Issue.all(:conditions => merge_conditions("#{Issue.table_name}.fixed_version_id IS NOT NULL" +
+                                                " AND #{Issue.table_name}.project_id <> #{Version.table_name}.project_id" +
+                                                " AND #{Version.table_name}.sharing <> 'system'",
+                                                conditions),
+              :include => [:project, :fixed_version]
+              ).each do |issue|
+      next if issue.project.nil? || issue.fixed_version.nil?
+      unless issue.project.shared_versions.include?(issue.fixed_version)
+        issue.init_journal(User.current)
+        issue.fixed_version = nil
+        issue.save
+      end
+    end
+  end
   
   # Callback on attachment deletion
   def attachment_removed(obj)
@@ -353,4 +519,33 @@ class Issue < ActiveRecord::Base
       @current_journal.save
     end
   end
+
+  # Query generator for selecting groups of issue counts for a project
+  # based on specific criteria
+  #
+  # Options
+  # * project - Project to search in.
+  # * field - String. Issue field to key off of in the grouping.
+  # * joins - String. The table name to join against.
+  def self.count_and_group_by(options)
+    project = options.delete(:project)
+    select_field = options.delete(:field)
+    joins = options.delete(:joins)
+
+    where = "i.#{select_field}=j.id"
+    
+    ActiveRecord::Base.connection.select_all("select    s.id as status_id, 
+                                                s.is_closed as closed, 
+                                                j.id as #{select_field},
+                                                count(i.id) as total 
+                                              from 
+                                                  #{Issue.table_name} i, #{IssueStatus.table_name} s, #{joins} as j
+                                              where 
+                                                i.status_id=s.id 
+                                                and #{where}
+                                                and i.project_id=#{project.id}
+                                              group by s.id, s.is_closed, j.id")
+  end
+  
+
 end

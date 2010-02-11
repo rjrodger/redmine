@@ -40,13 +40,14 @@ class IssuesController < ApplicationController
   helper :attachments
   include AttachmentsHelper
   helper :queries
+  include QueriesHelper
   helper :sort
   include SortHelper
   include IssuesHelper
   helper :timelog
   include Redmine::Export::PDF
 
-  verify :method => :post,
+  verify :method => [:post, :delete],
          :only => :destroy,
          :render => { :nothing => true, :status => :method_not_allowed }
            
@@ -56,12 +57,13 @@ class IssuesController < ApplicationController
     sort_update({'id' => "#{Issue.table_name}.id"}.merge(@query.available_columns.inject({}) {|h, c| h[c.name.to_s] = c.sortable; h}))
     
     if @query.valid?
-      limit = per_page_option
-      respond_to do |format|
-        format.html { }
-        format.atom { limit = Setting.feeds_limit.to_i }
-        format.csv  { limit = Setting.issues_export_limit.to_i }
-        format.pdf  { limit = Setting.issues_export_limit.to_i }
+      limit = case params[:format]
+      when 'csv', 'pdf'
+        Setting.issues_export_limit.to_i
+      when 'atom'
+        Setting.feeds_limit.to_i
+      else
+        per_page_option
       end
       
       @issue_count = @query.issue_count
@@ -74,6 +76,7 @@ class IssuesController < ApplicationController
       
       respond_to do |format|
         format.html { render :template => 'issues/index.rhtml', :layout => !request.xhr? }
+        format.xml  { render :layout => false }
         format.atom { render_feed(@issues, :title => "#{@project || Setting.app_title}: #{l(:label_issue_plural)}") }
         format.csv  { send_data(issues_to_csv(@issues, @project), :type => 'text/csv; header=present', :filename => 'export.csv') }
         format.pdf  { send_data(issues_to_pdf(@issues, @project, @query), :type => 'application/pdf', :filename => 'export.pdf') }
@@ -105,7 +108,7 @@ class IssuesController < ApplicationController
     @journals = @issue.journals.find(:all, :include => [:user, :details], :order => "#{Journal.table_name}.created_on ASC")
     @journals.each_with_index {|j,i| j.indice = i+1}
     @journals.reverse! if User.current.wants_comments_in_reverse_order?
-    @changesets = @issue.changesets
+    @changesets = @issue.changesets.visible.all
     @changesets.reverse! if User.current.wants_comments_in_reverse_order?
     @allowed_statuses = @issue.new_statuses_allowed_to(User.current)
     @edit_allowed = User.current.allowed_to?(:edit_issues, @project)
@@ -113,6 +116,7 @@ class IssuesController < ApplicationController
     @time_entry = TimeEntry.new
     respond_to do |format|
       format.html { render :template => 'issues/show.rhtml' }
+      format.xml  { render :layout => false }
       format.atom { render :action => 'changes', :layout => false, :content_type => 'application/atom+xml' }
       format.pdf  { send_data(issue_to_pdf(@issue), :type => 'application/pdf', :filename => "#{@project.identifier}-#{@issue.id}.pdf") }
     end
@@ -131,7 +135,7 @@ class IssuesController < ApplicationController
       return
     end
     if params[:issue].is_a?(Hash)
-      @issue.attributes = params[:issue]
+      @issue.safe_attributes = params[:issue]
       @issue.watcher_user_ids = params[:issue]['watcher_user_ids'] if User.current.allowed_to?(:add_issue_watchers, @project)
     end
     @issue.author = User.current
@@ -150,15 +154,26 @@ class IssuesController < ApplicationController
       requested_status = IssueStatus.find_by_id(params[:issue][:status_id])
       # Check that the user is allowed to apply the requested status
       @issue.status = (@allowed_statuses.include? requested_status) ? requested_status : default_status
+      call_hook(:controller_issues_new_before_save, { :params => params, :issue => @issue })
       if @issue.save
         attach_files(@issue, params[:attachments])
         flash[:notice] = l(:notice_successful_create)
         call_hook(:controller_issues_new_after_save, { :params => params, :issue => @issue})
-        redirect_to(params[:continue] ? { :action => 'new', :tracker_id => @issue.tracker } :
-                                        { :action => 'show', :id => @issue })
+        respond_to do |format|
+          format.html {
+            redirect_to(params[:continue] ? { :action => 'new', :tracker_id => @issue.tracker } :
+                                            { :action => 'show', :id => @issue })
+          }
+          format.xml  { render :action => 'show', :status => :created, :location => url_for(:controller => 'issues', :action => 'show', :id => @issue) }
+        end
         return
-      end		
-    end	
+      else
+        respond_to do |format|
+          format.html { }
+          format.xml  { render(:xml => @issue.errors, :status => :unprocessable_entity); return }
+        end
+      end
+    end 
     @priorities = IssuePriority.all
     render :layout => !request.xhr?
   end
@@ -180,28 +195,39 @@ class IssuesController < ApplicationController
       attrs = params[:issue].dup
       attrs.delete_if {|k,v| !UPDATABLE_ATTRS_ON_TRANSITION.include?(k) } unless @edit_allowed
       attrs.delete(:status_id) unless @allowed_statuses.detect {|s| s.id.to_s == attrs[:status_id].to_s}
-      @issue.attributes = attrs
+      @issue.safe_attributes = attrs
     end
 
-    if request.post?
+    if request.get?
+      # nop
+    else
       @time_entry = TimeEntry.new(:project => @project, :issue => @issue, :user => User.current, :spent_on => Date.today)
       @time_entry.attributes = params[:time_entry]
-      attachments = attach_files(@issue, params[:attachments])
-      attachments.each {|a| journal.details << JournalDetail.new(:property => 'attachment', :prop_key => a.id, :value => a.filename)}
-      
-      call_hook(:controller_issues_edit_before_save, { :params => params, :issue => @issue, :time_entry => @time_entry, :journal => journal})
-
-      if (@time_entry.hours.nil? || @time_entry.valid?) && @issue.save
-        # Log spend time
-        if User.current.allowed_to?(:log_time, @project)
-          @time_entry.save
+      if (@time_entry.hours.nil? || @time_entry.valid?) && @issue.valid?
+        attachments = attach_files(@issue, params[:attachments])
+        attachments.each {|a| journal.details << JournalDetail.new(:property => 'attachment', :prop_key => a.id, :value => a.filename)}
+        call_hook(:controller_issues_edit_before_save, { :params => params, :issue => @issue, :time_entry => @time_entry, :journal => journal})
+        if @issue.save
+          # Log spend time
+          if User.current.allowed_to?(:log_time, @project)
+            @time_entry.save
+          end
+          if !journal.new_record?
+            # Only send notification if something was actually changed
+            flash[:notice] = l(:notice_successful_update)
+          end
+          call_hook(:controller_issues_edit_after_save, { :params => params, :issue => @issue, :time_entry => @time_entry, :journal => journal})
+          respond_to do |format|
+            format.html { redirect_back_or_default({:action => 'show', :id => @issue}) }
+            format.xml  { head :ok }
+          end
+          return
         end
-        if !journal.new_record?
-          # Only send notification if something was actually changed
-          flash[:notice] = l(:notice_successful_update)
-        end
-        call_hook(:controller_issues_edit_after_save, { :params => params, :issue => @issue, :time_entry => @time_entry, :journal => journal})
-        redirect_to(params[:back_to] || {:action => 'show', :id => @issue})
+      end
+      # failure
+      respond_to do |format|
+        format.html { }
+        format.xml  { render :xml => @issue.errors, :status => :unprocessable_entity }
       end
     end
   rescue ActiveRecord::StaleObjectError
@@ -239,7 +265,7 @@ class IssuesController < ApplicationController
       priority = params[:priority_id].blank? ? nil : IssuePriority.find_by_id(params[:priority_id])
       assigned_to = (params[:assigned_to_id].blank? || params[:assigned_to_id] == 'none') ? nil : User.find_by_id(params[:assigned_to_id])
       category = (params[:category_id].blank? || params[:category_id] == 'none') ? nil : @project.issue_categories.find_by_id(params[:category_id])
-      fixed_version = (params[:fixed_version_id].blank? || params[:fixed_version_id] == 'none') ? nil : @project.versions.find_by_id(params[:fixed_version_id])
+      fixed_version = (params[:fixed_version_id].blank? || params[:fixed_version_id] == 'none') ? nil : @project.shared_versions.find_by_id(params[:fixed_version_id])
       custom_field_values = params[:custom_field_values] ? params[:custom_field_values].reject {|k,v| v.blank?} : nil
       
       unsaved_issue_ids = []      
@@ -268,16 +294,15 @@ class IssuesController < ApplicationController
                                                          :total => @issues.size,
                                                          :ids => '#' + unsaved_issue_ids.join(', #'))
       end
-      redirect_to(params[:back_to] || {:controller => 'issues', :action => 'index', :project_id => @project})
+      redirect_back_or_default({:controller => 'issues', :action => 'index', :project_id => @project})
       return
     end
-    # Find potential statuses the user could be allowed to switch issues to
-    @available_statuses = Workflow.find(:all, :include => :new_status,
-                                              :conditions => {:role_id => User.current.roles_for_project(@project).collect(&:id)}).collect(&:new_status).compact.uniq.sort
-    @custom_fields = @project.issue_custom_fields.select {|f| f.field_format == 'list'}
+    @available_statuses = Workflow.available_statuses(@project)
+    @custom_fields = @project.all_issue_custom_fields
   end
 
   def move
+    @copy = params[:copy_options] && params[:copy_options][:copy]
     @allowed_projects = []
     # find projects to which the user is allowed to move the issue
     if User.current.admin?
@@ -289,13 +314,20 @@ class IssuesController < ApplicationController
     @target_project = @allowed_projects.detect {|p| p.id.to_s == params[:new_project_id]} if params[:new_project_id]
     @target_project ||= @project    
     @trackers = @target_project.trackers
+    @available_statuses = Workflow.available_statuses(@project)
     if request.post?
       new_tracker = params[:new_tracker_id].blank? ? nil : @target_project.trackers.find_by_id(params[:new_tracker_id])
       unsaved_issue_ids = []
       moved_issues = []
       @issues.each do |issue|
+        changed_attributes = {}
+        [:assigned_to_id, :status_id, :start_date, :due_date].each do |valid_attribute|
+          unless params[valid_attribute].blank?
+            changed_attributes[valid_attribute] = (params[valid_attribute] == 'none' ? nil : params[valid_attribute])
+          end 
+        end
         issue.init_journal(User.current)
-        if r = issue.move_to(@target_project, new_tracker, params[:copy_options])
+        if r = issue.move_to(@target_project, new_tracker, {:copy => @copy, :attributes => changed_attributes})
           moved_issues << r
         else
           unsaved_issue_ids << issue.id
@@ -339,17 +371,23 @@ class IssuesController < ApplicationController
           TimeEntry.update_all("issue_id = #{reassign_to.id}", ['issue_id IN (?)', @issues])
         end
       else
-        # display the destroy form
-        return
+        unless params[:format] == 'xml'
+          # display the destroy form if it's a user request
+          return
+        end
       end
     end
     @issues.each(&:destroy)
-    redirect_to :action => 'index', :project_id => @project
+    respond_to do |format|
+      format.html { redirect_to :action => 'index', :project_id => @project }
+      format.xml  { head :ok }
+    end
   end
   
   def gantt
     @gantt = Redmine::Helpers::Gantt.new(params)
     retrieve_query
+    @query.group_by = nil
     if @query.valid?
       events = []
       # Issues that have start and due dates
@@ -389,6 +427,7 @@ class IssuesController < ApplicationController
     
     @calendar = Redmine::Helpers::Calendar.new(Date.civil(@year, @month, 1), current_language, :month)
     retrieve_query
+    @query.group_by = nil
     if @query.valid?
       events = []
       events += @query.issues(:include => [:tracker, :assigned_to, :priority],
@@ -421,9 +460,9 @@ class IssuesController < ApplicationController
     if @project
       @assignables = @project.assignable_users
       @assignables << @issue.assigned_to if @issue && @issue.assigned_to && !@assignables.include?(@issue.assigned_to)
+      @trackers = @project.trackers
     end
     
-    @trackers = @project.trackers
     @priorities = IssuePriority.all.reverse
     @statuses = IssueStatus.find(:all, :order => 'position')
     @back = params[:back_url] || request.env['HTTP_REFERER']
@@ -432,11 +471,11 @@ class IssuesController < ApplicationController
   end
 
   def update_form
-    if params[:id]
-      @issue = @project.issues.visible.find(params[:id])
-    else
+    if params[:id].blank?
       @issue = Issue.new
       @issue.project = @project
+    else
+      @issue = @project.issues.visible.find(params[:id])
     end
     @issue.attributes = params[:issue]
     @allowed_statuses = ([@issue.status] + @issue.status.find_new_statuses_allowed_to(User.current.roles_for_project(@project), @issue.tracker)).uniq
@@ -469,14 +508,16 @@ private
       @project = projects.first
     else
       # TODO: let users bulk edit/move/destroy issues from different projects
-      render_error 'Can not bulk edit/move/destroy issues from different projects' and return false
+      render_error 'Can not bulk edit/move/destroy issues from different projects'
+      return false
     end
   rescue ActiveRecord::RecordNotFound
     render_404
   end
   
   def find_project
-    @project = Project.find(params[:project_id])
+    project_id = (params[:issue] && params[:issue][:project_id]) || params[:project_id]
+    @project = Project.find(project_id)
   rescue ActiveRecord::RecordNotFound
     render_404
   end
@@ -499,7 +540,7 @@ private
       session[:query] = {:id => @query.id, :project_id => @query.project_id}
       sort_clear
     else
-      if params[:set_filter] || session[:query].nil? || session[:query][:project_id] != (@project ? @project.id : nil)
+      if api_request? || params[:set_filter] || session[:query].nil? || session[:query][:project_id] != (@project ? @project.id : nil)
         # Give it a name, required to be valid
         @query = Query.new(:name => "_")
         @query.project = @project
