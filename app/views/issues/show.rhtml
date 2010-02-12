@@ -1,16 +1,9 @@
-<div class="contextual">
-<%= link_to_if_authorized(l(:button_update), {:controller => 'issues', :action => 'edit', :id => @issue }, :onclick => 'showAndScrollTo("update", "notes"); return false;', :class => 'icon icon-edit', :accesskey => accesskey(:edit)) %>
-<%= link_to_if_authorized l(:button_log_time), {:controller => 'timelog', :action => 'edit', :issue_id => @issue}, :class => 'icon icon-time-add' %>
-<%= watcher_tag(@issue, User.current) %>
-<%= link_to_if_authorized l(:button_copy), {:controller => 'issues', :action => 'new', :project_id => @project, :copy_from => @issue }, :class => 'icon icon-copy' %>
-<%= link_to_if_authorized l(:button_move), {:controller => 'issues', :action => 'move', :id => @issue }, :class => 'icon icon-move' %>
-<%= link_to_if_authorized l(:button_delete), {:controller => 'issues', :action => 'destroy', :id => @issue}, :confirm => l(:text_are_you_sure), :method => :post, :class => 'icon icon-del' %>
-</div>
+<%= render :partial => 'action_menu' %>
 
 <h2><%= @issue.tracker.name %> #<%= @issue.id %></h2>
 
 <div class="<%= @issue.css_classes %> details">
-        <%= avatar(@issue.author, :size => "64") %>
+        <%= avatar(@issue.author, :size => "50") %>
         <h3><%=h @issue.subject %></h3>
         <p class="author">
         <%= authoring @issue.created_on, @issue.author %>.
@@ -80,7 +73,7 @@
 
 </div>
 
-<% if @changesets.any? && User.current.allowed_to?(:view_changesets, @project) %>
+<% if @changesets.any? %>
 <div id="issue-changesets">
 <h3><%=l(:label_associated_revisions)%></h3>
 <%= render :partial => 'changesets', :locals => { :changesets => @changesets} %>
@@ -93,6 +86,9 @@
 <%= render :partial => 'history', :locals => { :journals => @journals } %>
 </div>
 <% end %>
+
+<%= render :partial => 'action_menu', :locals => {:replace_watcher => 'watcher2' } %>
+
 <div style="clear: both;"></div>
 
 <% if authorize_for('issues', 'edit') %>

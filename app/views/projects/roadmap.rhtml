@@ -5,8 +5,7 @@
 <% else %>
 <div id="roadmap">
 <% @versions.each do |version| %>   
-    <%= tag 'a', :name => version.name %>
-    <h3 class="icon22 icon22-package"><%= link_to h(version.name), :controller => 'versions', :action => 'show', :id => version %></h3>
+    <h3 class="version"><%= tag 'a', :name => version.name %><%= link_to_version version %></h3>
     <%= render :partial => 'versions/overview', :locals => {:version => version} %>
     <%= render(:partial => "wiki/content", :locals => {:content => version.wiki_page.content}) if version.wiki_page %>
 
@@ -26,7 +25,7 @@
 	<td width=15% align=center ><b>Current state</b></td>
 </tr>
     <%- issues.each do |issue| -%>
-        <tr><td width=40% align=left><%= link_to_issue(issue) %>: <%=h issue.subject %></td>
+        <tr><td width=40% align=left><%= link_to_issue(issue, :project => (@project != issue.project)) %>: <%=h issue.subject %></td>
 <td width=15%>  <div class="progress"> <%= progress_bar(issue.done_ratio) %> </div> </td>
 <td width=15% align=center>
 	<% if (issue.status.is_closed == true || issue.status.name == "Ready")%> 
@@ -51,16 +50,20 @@
 <h3><%= l(:label_roadmap) %></h3>
 <% @trackers.each do |tracker| %>
   <label><%= check_box_tag "tracker_ids[]", tracker.id, (@selected_tracker_ids.include? tracker.id.to_s), :id => nil %>
-  <%= tracker.name %></label><br />
+  <%=h tracker.name %></label><br />
 <% end %>
 <br />
 <label for="completed"><%= check_box_tag "completed", 1, params[:completed] %> <%= l(:label_show_completed_versions) %></label>
+<% if @project.descendants.active.any? %>
+	<%= hidden_field_tag 'with_subprojects', 0 %>
+  <br /><label><%= check_box_tag 'with_subprojects', 1, @with_subprojects %> <%=l(:label_subproject_plural)%></label>
+<% end %>
 <p><%= submit_tag l(:button_apply), :class => 'button-small', :name => nil %></p>
 <% end %>
 
 <h3><%= l(:label_version_plural) %></h3>
 <% @versions.each do |version| %>
-<%= link_to version.name, "##{version.name}" %><br />
+<%= link_to format_version_name(version), "##{version.name}" %><br />
 <% end %>
 <% end %>
 

@@ -64,6 +64,7 @@ module ApplicationHelper
   #   link_to_issue(issue)                        # => Defect #6: This is the subject
   #   link_to_issue(issue, :truncate => 6)        # => Defect #6: This i...
   #   link_to_issue(issue, :subject => false)     # => Defect #6
+  #   link_to_issue(issue, :project => true)      # => Foo - Defect #6
   #
   def link_to_issue(issue, options={})
     title = nil
@@ -80,6 +81,7 @@ module ApplicationHelper
                                                  :class => issue.css_classes,
                                                  :title => title
     s << ": #{h subject}" if subject
+    s = "#{h issue.project} - " + s if options[:project]
     s
   end
 
@@ -92,6 +94,15 @@ module ApplicationHelper
     action = options.delete(:download) ? 'download' : 'show'
 
     link_to(h(text), {:controller => 'attachments', :action => action, :id => attachment, :filename => attachment.filename }, options)
+  end
+
+  # Generates a link to a SCM revision
+  # Options:
+  # * :text - Link text (default to the formatted revision)
+  def link_to_revision(revision, project, options={})
+    text = options.delete(:text) || format_revision(revision)
+
+    link_to(text, {:controller => 'repositories', :action => 'revision', :id => project, :rev => revision}, :title => l(:label_revision_id, revision))
   end
 
   def toggle_link(name, id, options={})
@@ -126,6 +137,14 @@ module ApplicationHelper
     h(truncate(text.to_s, :length => 120).gsub(%r{[\r\n]*<(pre|code)>.*$}m, '...')).gsub(/[\r\n]+/, "<br />")
   end
 
+  def format_version_name(version)
+    if version.project == @project
+    	h(version)
+    else
+      h("#{version.project} - #{version}")
+    end
+  end
+  
   def due_date_distance_in_words(date)
     if date
       l((date < Date.today ? :label_roadmap_overdue : :label_roadmap_due_in), distance_of_date_in_words(Date.today, date))
@@ -270,6 +289,7 @@ module ApplicationHelper
 
   def pagination_links_full(paginator, count=nil, options={})
     page_param = options.delete(:page_param) || :page
+    per_page_links = options.delete(:per_page_links)
     url_param = params.dup
     # don't reuse query params if filters are present
     url_param.merge!(:fields => nil, :values => nil, :operators => nil) if url_param.delete(:set_filter)
@@ -288,10 +308,10 @@ module ApplicationHelper
     end
 
     unless count.nil?
-      html << [
-        " (#{paginator.current.first_item}-#{paginator.current.last_item}/#{count})",
-        per_page_links(paginator.items_per_page)
-      ].compact.join(' | ')
+      html << " (#{paginator.current.first_item}-#{paginator.current.last_item}/#{count})"
+      if per_page_links != false && links = per_page_links(paginator.items_per_page)
+	      html << " | #{links}"
+      end
     end
 
     html
@@ -377,12 +397,15 @@ module ApplicationHelper
       text = args.shift
     when 2
       obj = args.shift
-      text = obj.send(args.shift).to_s
+      attr = args.shift
+      text = obj.send(attr).to_s
     else
       raise ArgumentError, 'invalid arguments to textilizable'
     end
     return '' if text.blank?
 
+    text = Redmine::WikiFormatting.to_html(Setting.text_formatting, text, :object => obj, :attribute => attr) { |macro, args| exec_macro(macro, obj, args) }
+    
     only_path = options.delete(:only_path) == false ? false : true
 
     # when using an image link, try to use an attachment, if possible
@@ -390,22 +413,23 @@ module ApplicationHelper
 
     if attachments
       attachments = attachments.sort_by(&:created_on).reverse
-      text = text.gsub(/!((\<|\=|\>)?(\([^\)]+\))?(\[[^\]]+\])?(\{[^\}]+\})?)(\S+\.(bmp|gif|jpg|jpeg|png))!/i) do |m|
-        style = $1
-        filename = $6.downcase
+      text.gsub!(/src="([^\/"]+\.(bmp|gif|jpg|jpeg|png))"(\s+alt="([^"]*)")?/i) do |m|
+        filename, ext, alt, alttext = $1.downcase, $2, $3, $4 
+        
         # search for the picture in attachments
         if found = attachments.detect { |att| att.filename.downcase == filename }
           image_url = url_for :only_path => only_path, :controller => 'attachments', :action => 'download', :id => found
-          desc = found.description.to_s.gsub(/^([^\(\)]*).*$/, "\\1")
-          alt = desc.blank? ? nil : "(#{desc})"
-          "!#{style}#{image_url}#{alt}!"
+          desc = found.description.to_s.gsub('"', '')
+          if !desc.blank? && alttext.blank?
+            alt = " title=\"#{desc}\" alt=\"#{desc}\""
+          end
+          "src=\"#{image_url}\"#{alt}"
         else
           m
         end
       end
     end
 
-    text = Redmine::WikiFormatting.to_html(Setting.text_formatting, text) { |macro, args| exec_macro(macro, obj, args) }
 
     # different methods for formatting wiki links
     case options[:wiki_links]
@@ -649,8 +673,18 @@ module ApplicationHelper
     unless @calendar_headers_tags_included
       @calendar_headers_tags_included = true
       content_for :header_tags do
+        start_of_week = case Setting.start_of_week.to_i
+        when 1
+          'Calendar._FD = 1;' # Monday
+        when 7
+          'Calendar._FD = 0;' # Sunday
+        else
+          '' # use language
+        end
+        
         javascript_include_tag('calendar/calendar') +
         javascript_include_tag("calendar/lang/calendar-#{current_language.to_s.downcase}.js") +
+        javascript_tag(start_of_week) +  
         javascript_include_tag('calendar/calendar-setup') +
         stylesheet_link_tag('calendar')
       end

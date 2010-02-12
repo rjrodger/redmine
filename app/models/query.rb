@@ -37,6 +37,10 @@ class QueryColumn
   def sortable?
     !sortable.nil?
   end
+  
+  def value(issue)
+    issue.send name
+  end
 end
 
 class QueryCustomFieldColumn < QueryColumn
@@ -57,6 +61,11 @@ class QueryCustomFieldColumn < QueryColumn
   
   def custom_field
     @cf
+  end
+  
+  def value(issue)
+    cv = issue.custom_values.detect {|v| v.custom_field_id == @cf.id}
+    cv && @cf.cast_value(cv.value)
   end
 end
 
@@ -178,6 +187,7 @@ class Query < ActiveRecord::Base
       user_values += project.users.sort.collect{|s| [s.name, s.id.to_s] }
     else
       # members of the user's projects
+      # OPTIMIZE: Is selecting from users per project (N+1)
       user_values += User.current.projects.collect(&:users).flatten.uniq.sort.collect{|s| [s.name, s.id.to_s] }
     end
     @available_filters["assigned_to_id"] = { :type => :list_optional, :order => 4, :values => user_values } unless user_values.empty?
@@ -192,8 +202,8 @@ class Query < ActiveRecord::Base
       unless @project.issue_categories.empty?
         @available_filters["category_id"] = { :type => :list_optional, :order => 6, :values => @project.issue_categories.collect{|s| [s.name, s.id.to_s] } }
       end
-      unless @project.versions.empty?
-        @available_filters["fixed_version_id"] = { :type => :list_optional, :order => 7, :values => @project.versions.sort.collect{|s| [s.name, s.id.to_s] } }
+      unless @project.shared_versions.empty?
+        @available_filters["fixed_version_id"] = { :type => :list_optional, :order => 7, :values => @project.shared_versions.sort.collect{|s| ["#{s.project.name} - #{s.name}", s.id.to_s] } }
       end
       unless @project.descendants.active.empty?
         @available_filters["subproject_id"] = { :type => :list_subprojects, :order => 13, :values => @project.descendants.visible.collect{|s| [s.name, s.id.to_s] } }
@@ -201,6 +211,10 @@ class Query < ActiveRecord::Base
       add_custom_fields_filters(@project.all_issue_custom_fields)
     else
       # global filters for cross project issue list
+      system_shared_versions = Version.visible.find_all_by_sharing('system')
+      unless system_shared_versions.empty?
+        @available_filters["fixed_version_id"] = { :type => :list_optional, :order => 7, :values => system_shared_versions.sort.collect{|s| ["#{s.project.name} - #{s.name}", s.id.to_s] } }
+      end
       add_custom_fields_filters(IssueCustomField.find(:all, :conditions => {:is_filter => true, :is_for_all => true}))
     end
     @available_filters
@@ -223,7 +237,7 @@ class Query < ActiveRecord::Base
   
   def add_short_filter(field, expression)
     return unless expression
-    parms = expression.scan(/^(o|c|\!|\*)?(.*)$/).first
+    parms = expression.scan(/^(o|c|!\*|!|\*)?(.*)$/).first
     add_filter field, (parms[0] || "="), [parms[1] || ""]
   end
   
@@ -408,16 +422,20 @@ class Query < ActiveRecord::Base
   
   # Returns the issue count by group or nil if query is not grouped
   def issue_count_by_group
+    r = nil
     if grouped?
       begin
         # Rails will raise an (unexpected) RecordNotFound if there's only a nil group value
-        Issue.count(:group => group_by_statement, :include => [:status, :project], :conditions => statement)
+        r = Issue.count(:group => group_by_statement, :include => [:status, :project], :conditions => statement)
       rescue ActiveRecord::RecordNotFound
-        {nil => issue_count}
+        r = {nil => issue_count}
       end
-    else
-      nil
+      c = group_by_column
+      if c.is_a?(QueryCustomFieldColumn)
+        r = r.keys.inject({}) {|h, k| h[c.custom_field.cast_value(k)] = r[k]; h}
+      end
     end
+    r
   rescue ::ActiveRecord::StatementInvalid => e
     raise StatementInvalid.new(e.message)
   end
